@@ -189,14 +189,30 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         tk.Label(top, textvariable=self.file_var, font=F_BASE,
                  bg=BG, fg=TEXT).pack(side="left", padx=12)
 
-        # プレビュー（白パネル＋ピンクの枠）
+        # プレビュー（白パネル＋ピンクの枠、縦はスクロール）
         panel = tk.Frame(self, bg=PANEL, highlightbackground=LINE,
                          highlightthickness=2)
         panel.pack(padx=16, pady=10)
-        self.preview_label = tk.Label(
-            panel, text="ここにプレビューが出ます\n（横 384 ドット実寸 ×2）\n\n画像ファイルをドラッグ＆ドロップでもOK",
-            font=F_BASE, bg=PANEL, fg=SUBTLE, width=52, height=8)
-        self.preview_label.pack(padx=6, pady=6)
+        # 画面の高さに収まるよう、プレビュー枠の高さを決める
+        pv_h = max(240, min(440, self.winfo_screenheight() - 470))
+        self.preview_canvas = tk.Canvas(
+            panel, width=WIDTH * PREVIEW_ZOOM, height=pv_h, bg=PANEL,
+            highlightthickness=0)
+        self.preview_canvas.pack(side="left", padx=6, pady=6)
+        pv_scroll = tk.Scrollbar(panel, orient="vertical",
+                                 command=self.preview_canvas.yview)
+        pv_scroll.pack(side="right", fill="y", pady=6)
+        self.preview_canvas.config(yscrollcommand=pv_scroll.set)
+        self.preview_canvas.create_text(
+            WIDTH * PREVIEW_ZOOM // 2, pv_h // 2, anchor="center",
+            text="ここにプレビューが出ます\n（横 384 ドット実寸 ×2）\n\n"
+                 "画像ファイルをドラッグ＆ドロップでもOK\n"
+                 "縦に長い画像はホイールでスクロール",
+            font=F_BASE, fill=SUBTLE, justify="center", tags="placeholder")
+        self.preview_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self.preview_canvas.yview_scroll(
+                -1 if e.delta > 0 else 1, "units"))
         self._photo = None
 
         # オプション
@@ -242,7 +258,7 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         # ドラッグ＆ドロップ（tkinterdnd2 がある場合のみ）
         if HAS_DND:
-            for w in (self, self.preview_label):
+            for w in (self, self.preview_canvas):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<Drop>>", self.on_drop)
 
@@ -284,7 +300,11 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         zoomed = pv.resize((pv.width * PREVIEW_ZOOM, pv.height * PREVIEW_ZOOM),
                            Image.NEAREST)
         self._photo = ImageTk.PhotoImage(zoomed)
-        self.preview_label.config(image=self._photo, text="", width=0, height=0)
+        cv = self.preview_canvas
+        cv.delete("all")
+        cv.create_image(0, 0, anchor="nw", image=self._photo)
+        cv.config(scrollregion=(0, 0, zoomed.width, zoomed.height))
+        cv.yview_moveto(0)
 
     def _run_bg(self, coro_factory, busy_msg: str):
         if self.busy:
