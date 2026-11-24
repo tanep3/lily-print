@@ -25,7 +25,7 @@ try:
 except ImportError:  # ドラッグ＆ドロップは任意機能
     HAS_DND = False
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageGrab, ImageOps, ImageTk
 
 from lxd02 import LXD02, PrinterError, find_printer
 from lxd02.protocol import WIDTH, rasterize  # noqa: F401  (rasterize は検証用に参照)
@@ -58,15 +58,20 @@ F_MONO = ("Consolas", 14)
 
 
 # ---------------------------------------------------------------- rendering
-def load_gray_384(path: str) -> Image.Image:
-    """画像を開き、横 384px のグレースケール (L) に整形する。"""
-    img = Image.open(path)
-    img = ImageOps.exif_transpose(img)  # 写真の回転情報を反映
+def to_gray_384(img: Image.Image) -> Image.Image:
+    """PIL 画像を横 384px のグレースケール (L) に整形する。"""
     gray = img.convert("L")
     if gray.width != WIDTH:
         h = max(1, round(gray.height * WIDTH / gray.width))
         gray = gray.resize((WIDTH, h), Image.LANCZOS)
     return gray
+
+
+def load_gray_384(path: str) -> Image.Image:
+    """画像ファイルを開き、横 384px のグレースケール (L) に整形する。"""
+    img = Image.open(path)
+    img = ImageOps.exif_transpose(img)  # 写真の回転情報を反映
+    return to_gray_384(img)
 
 
 def to_bw(gray: Image.Image, dither: bool) -> Image.Image:
@@ -186,6 +191,8 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=16, pady=(14, 4))
         cute_button(top, "ファイルを開く", self.open_file, PURPLE).pack(side="left")
+        cute_button(top, "貼り付け", self.paste_clipboard, PURPLE).pack(
+            side="left", padx=(10, 0))
         tk.Label(top, textvariable=self.file_var, font=F_BASE,
                  bg=BG, fg=TEXT).pack(side="left", padx=12)
 
@@ -207,6 +214,7 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             WIDTH * PREVIEW_ZOOM // 2, pv_h // 2, anchor="center",
             text="ここにプレビューが出ます\n（横 384 ドット実寸 ×2）\n\n"
                  "画像ファイルをドラッグ＆ドロップでもOK\n"
+                 "コピーした画像は「貼り付け」か Ctrl+V でもOK\n"
                  "縦に長い画像はホイールでスクロール",
             font=F_BASE, fill=SUBTLE, justify="center", tags="placeholder")
         self.preview_canvas.bind(
@@ -235,8 +243,9 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         addr.pack(fill="x", padx=16, pady=4)
         tk.Label(addr, text="プリンタ MAC", font=F_BASE,
                  bg=BG, fg=TEXT).pack(side="left")
-        tk.Entry(addr, textvariable=self.address_var, width=19,
-                 font=F_MONO).pack(side="left", padx=6)
+        self.address_entry = tk.Entry(addr, textvariable=self.address_var,
+                                      width=19, font=F_MONO)
+        self.address_entry.pack(side="left", padx=6)
         self.find_btn = cute_button(addr, "探す", self.find_printer_ui, PURPLE)
         self.find_btn.pack(side="left")
 
@@ -262,6 +271,9 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<Drop>>", self.on_drop)
 
+        # Ctrl+V でクリップボードの画像を貼る（MAC 欄にフォーカス中は除く）
+        self.bind("<Control-v>", self._on_ctrl_v)
+
         self.after(100, self._poll_results)
 
     # ------------------------------------------------------------ actions
@@ -284,14 +296,37 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def load_path(self, path: str):
         try:
-            self.gray = load_gray_384(path)
+            gray = load_gray_384(path)
         except Exception as exc:
             messagebox.showerror("読み込み失敗", str(exc))
             return
-        self.file_var.set(Path(path).name)
+        self._set_gray(gray, Path(path).name)
+
+    def _set_gray(self, gray: Image.Image, name: str):
+        self.gray = gray
+        self.file_var.set(name)
         self.status_var.set(
-            f"読み込んだよ：横 {self.gray.width} × 縦 {self.gray.height} ドット")
+            f"読み込んだよ：横 {gray.width} × 縦 {gray.height} ドット")
         self.refresh_preview()
+
+    def _on_ctrl_v(self, event=None):
+        if self.focus_get() is self.address_entry:
+            return  # MAC 欄への文字貼り付けは通常動作に任せる
+        self.paste_clipboard()
+
+    def paste_clipboard(self):
+        try:
+            data = ImageGrab.grabclipboard()
+        except Exception:
+            data = None
+        if isinstance(data, Image.Image):
+            self._set_gray(to_gray_384(data), "クリップボードの画像")
+        elif isinstance(data, list) and data:  # エクスプローラーでコピーしたファイル
+            self.load_path(str(data[0]))
+        else:
+            self.status_var.set(
+                "クリップボードに画像がありません。"
+                "ブラウザで画像を右クリック→「画像をコピー」してから貼ってね。")
 
     def refresh_preview(self):
         if self.gray is None:
