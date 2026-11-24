@@ -1,0 +1,31 @@
+name: Build exe on tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install lxd02-printer tkinterdnd2 pyinstaller
+
+      - name: Build exe
+        run: pyinstaller --onefile --windowed --name LilyPrint --collect-all tkinterdnd2 --noconfirm lily_print.py
+
+      - name: Publish release with exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LilyPrint.exe
+          generate_release_notes: true
