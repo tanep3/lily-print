@@ -37,7 +37,7 @@ if getattr(sys, "frozen", False):  # PyInstaller の exe では exe の隣に設
 else:
     APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "lily_print_config.json"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 CREDIT = "© Tane Channel Technology"
 
 # ---------------------------------------------------------------- theme
@@ -280,6 +280,9 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._drag = None                           # クロップ中のドラッグ状態
         self.results: queue.Queue = queue.Queue()
         self.busy = False
+        self._job_loop = None   # 実行中ジョブの asyncio ループ（キャンセル用）
+        self._job_task = None
+        self._cancelling = False
 
         self.address_var = tk.StringVar(value=cfg.get("address", ""))
         self.dither_var = tk.BooleanVar(value=bool(cfg.get("dither", True)))
@@ -394,6 +397,10 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.print_btn = RoundedButton(btns, "♡ 印刷する ♡", self.do_print,
                                        ACCENT, font=F_BIGBTN, padx=30, pady=12)
         self.print_btn.pack(side="right")
+        # 印刷中だけ印刷ボタンの左に出るキャンセルボタン
+        self.cancel_btn = RoundedButton(btns, "キャンセル", self.cancel_print,
+                                        PANEL, fg=TEXT, border=LINE,
+                                        font=F_BIGBTN, padx=20, pady=12)
 
         # ステータス
         tk.Label(self, textvariable=self.status_var, font=F_STATUS,
@@ -674,23 +681,47 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._draw_crop_overlay()
 
     # ------------------------------------------------------------ printer
-    def _run_bg(self, coro_factory, busy_msg: str):
+    def _run_bg(self, coro_factory, busy_msg: str, kind: str | None = None):
         if self.busy:
             return
         self.busy = True
+        self._cancelling = False
         for btn in (self.print_btn, self.status_btn, self.find_btn):
             btn.config(state="disabled")
+        if kind == "print":
+            self.cancel_btn.pack(side="right", padx=(0, 10))
         self.status_var.set(busy_msg)
         self._persist()
 
         def worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            task = loop.create_task(coro_factory())
+            self._job_loop, self._job_task = loop, task
             try:
-                result = asyncio.run(coro_factory())
+                result = loop.run_until_complete(task)
                 self.results.put(("ok", result))
+            except asyncio.CancelledError:
+                self.results.put(("cancelled", None))
             except Exception as exc:  # PrinterError ほか
                 self.results.put(("error", explain_error(exc)))
+            finally:
+                self._job_loop = self._job_task = None
+                loop.close()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def cancel_print(self):
+        """印刷ジョブを中断する。プロトコルに停止コマンドは無いので、
+        送信タスクをキャンセルして BLE を切断する。送信済みのパケット
+        （数行分）は印刷されてしまう。"""
+        loop, task = self._job_loop, self._job_task
+        if loop is None or task is None or self._cancelling:
+            return
+        self._cancelling = True
+        self.cancel_btn.config(state="disabled")
+        self.status_var.set("キャンセルしています…")
+        loop.call_soon_threadsafe(task.cancel)
 
     def find_printer_ui(self):
         self._run_bg(_find_job, "プリンタを探しています…")
@@ -709,7 +740,7 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         gray, energy = self.gray, int(self.energy_var.get())
         copies, dither = int(self.copies_var.get()), self.dither_var.get()
         self._run_bg(lambda: _print_job(address, gray, energy, copies, dither),
-                     "印刷しています… ♪")
+                     "印刷しています… ♪", kind="print")
 
     def _poll_results(self):
         try:
@@ -718,7 +749,12 @@ class LilyPrintApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 self.busy = False
                 for btn in (self.print_btn, self.status_btn, self.find_btn):
                     btn.config(state="normal")
-                if kind == "ok":
+                self.cancel_btn.pack_forget()
+                self.cancel_btn.config(state="normal")
+                if kind == "cancelled":
+                    self.status_var.set(
+                        "印刷をキャンセルしました（送信済みの数行は出ます）")
+                elif kind == "ok":
                     msg, address = payload
                     if address:
                         self.address_var.set(address)
